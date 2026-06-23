@@ -1,23 +1,19 @@
-TikTok Business API
+Updated README: how to configure the TikTok Business API endpoints for resumable or multipart uploads.
 
-This repository includes two ways to publish to TikTok:
+Key environment variables you can set to enable the Business API flow (examples):
 
-1) Preferred: TikTok Business/Open API (stable and compliant)
-   - Implemented as a scaffold in agents/poster_tiktok_api.py. You should provide an OAuth access token (TIKTOK_ACCESS_TOKEN)
-     and, if needed, set TIKTOK_API_BASE to the correct API base URL for your app.
-   - The scaffold includes functions to upload video (multipart) and create a post referencing the media id.
-   - If you provide a valid access token the CLI will attempt the Business API path first.
+# Simple multipart upload (if your API supports it)
+export TIKTOK_API_MULTIPART_UPLOAD_URL="https://api.example.com/v1/video/upload"
+export TIKTOK_ACCESS_TOKEN="<your-token>"
 
-2) Fallback: Browser automation (Playwright)
-   - Implemented in agents/poster_tiktok_playwright.py. This is fragile and may violate TikTok's Terms of Service.
-   - Use the interactive login helper agents/tiktok_login.py to generate a storage-state file and set TIKTOK_STORAGE_STATE to its path.
+# Resumable/chunked upload (recommended for large files)
+export TIKTOK_API_INIT_UPLOAD_URL="https://api.example.com/v1/video/resumable/init"
+export TIKTOK_API_UPLOAD_CHUNK_URL="https://api.example.com/v1/video/resumable/{upload_id}/chunk/{chunk_index}"
+export TIKTOK_API_FINALIZE_UPLOAD_URL="https://api.example.com/v1/video/resumable/finalize"
+export TIKTOK_CREATE_POST_URL="https://api.example.com/v1/video/post/create"
+export TIKTOK_ACCESS_TOKEN="<your-token>"
 
-Environment variables for API-based uploads
-- TIKTOK_ACCESS_TOKEN: OAuth access token for Business/Open API
-- TIKTOK_API_BASE: Optional — override the base URL for the API if your app uses a different version/endpoint
-
-If you want me to finalize the Business API integration, provide either:
-- A test access token and the exact API endpoints your app uses (I will not store these in the repo), or
-- The TikTok Business API documentation link for the authentication and upload endpoints your app should use.
-
-I can then implement a complete, tested Business API uploader (resumable uploads, chunked upload, polling, and post creation).
+Notes:
+- The scaffold will attempt the Business API upload when TIKTOK_ACCESS_TOKEN and the relevant endpoints are set.
+- If the API path fails or isn't configured, the agent falls back to the Playwright browser automation method.
+- If you can provide a test access token or the specific TikTok Business/OpenAPI documentation links for the API your app uses, I can map these scaffold endpoints to the exact final implementation and add integration tests.
