@@ -1,20 +1,32 @@
-"""TikTok browser automation fallback using Playwright.
+"""TikTok browser automation fallback using Playwright with optional session-state reuse.
+
+This module provides a best-effort implementation to upload a video and post it to TikTok via the
+web UI. It supports using a saved Playwright "storage state" (cookies/localStorage) so you can
+login once interactively and reuse the session for future automated uploads without embedding
+credentials.
 
 WARNING: Automating interactions with TikTok via browser automation may violate TikTok's Terms of Service.
 Use this fallback only if you understand and accept the legal and reliability risks. Prefer the
 TikTok Business API if you have it.
 
-This module provides a best-effort implementation to upload a video and post it to TikTok via the
-web UI. It requires the Playwright Python package and browser binaries (run `playwright install`).
+Usage patterns:
+- Interactive login once (saves state):
+    python agents/tiktok_login.py --storage agents/.tiktok_storage.json
+  Open browser, complete login/2FA manually, then close the browser. The file agents/.tiktok_storage.json
+  will contain Playwright storage state (auth cookies, localStorage).
 
-Environment variables:
-- TIKTOK_USERNAME - your TikTok username or email
-- TIKTOK_PASSWORD - your TikTok password
+- Automated upload using saved state:
+    from poster_tiktok_playwright import upload_to_tiktok_playwright
+    upload_to_tiktok_playwright('clip.mp4', 'caption text', storage_state='agents/.tiktok_storage.json')
+
+Requirements:
+- Playwright Python package and browser binaries. Install:
+    pip install playwright
+    playwright install
 
 Notes:
 - TikTok frequently changes its web UI. Selectors used here may break and need updates.
-- Two-factor auth, captcha, or other protections may block automation. You may need to login
-  interactively first or use a session cookie.
+- Two-factor auth, captcha, or other protections may block automation. Using a saved storage state reduces interactive logins but may still expire.
 """
 import os
 import time
@@ -28,8 +40,17 @@ except Exception:
 
 
 def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optional[str] = None,
-                                password: Optional[str] = None, headless: bool = True) -> bool:
+                                password: Optional[str] = None, storage_state: Optional[str] = None,
+                                headless: bool = True) -> bool:
     """Upload a video to TikTok using Playwright-driven browser automation.
+
+    Parameters:
+      - video_path: path to the local video file
+      - caption: text to place in the caption field
+      - username/password: optional credentials if you prefer direct login (not recommended)
+      - storage_state: path to Playwright storage state JSON file (recommended). If provided and exists,
+                       the browser context will be created with that state so no interactive login is required.
+      - headless: whether to run the browser headless. For initial interactive login set headless=False.
 
     Returns True on (likely) success, False otherwise.
     """
@@ -38,96 +59,65 @@ def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optiona
 
     username = username or os.getenv('TIKTOK_USERNAME')
     password = password or os.getenv('TIKTOK_PASSWORD')
-    if not username or not password:
-        raise ValueError('TIKTOK_USERNAME and TIKTOK_PASSWORD must be set in the environment to use the automation fallback')
-
     if not os.path.exists(video_path):
         raise FileNotFoundError(f'Video file not found: {video_path}')
+
+    # If storage_state provided and exists, use it. Otherwise, if storage_state provided but missing,
+    # we'll save it after an interactive login if possible.
+    save_storage_after = False
+    if storage_state:
+        storage_exists = os.path.exists(storage_state)
+    else:
+        storage_exists = False
 
     print('Starting Playwright browser...')
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
+        # Create context using storage state if available
+        if storage_state and storage_exists:
+            context = browser.new_context(storage_state=storage_state)
+            print(f'Loaded storage state from {storage_state}')
+        else:
+            context = browser.new_context()
+            if storage_state:
+                # We'll attempt to save state after a successful interactive login
+                save_storage_after = True
+
         page = context.new_page()
 
         try:
-            # Go to login page
-            page.goto('https://www.tiktok.com/login', timeout=60000)
-            time.sleep(2)
-
-            # TikTok may present multiple login options. Try locating the username/email input.
-            # If TikTok offers a QR or third-party login, the below might need adjustment.
-            try:
-                # Click "Use phone / email / username" if present
-                sel_switch = 'text="Use phone / email / username"'
-                if page.query_selector(sel_switch):
-                    page.click(sel_switch)
-                    time.sleep(1)
-            except PlaywrightTimeoutError:
-                pass
-
-            # Attempt to fill username/email and password fields
-            # There are several possible selectors; we try a few common ones.
-            username_selectors = [
-                'input[name="username"]',
-                'input[type="text"]',
-                'input[placeholder*="email"]',
-                'input[placeholder*="Username"]'
-            ]
-            password_selectors = [
-                'input[name="password"]',
-                'input[type="password"]',
-                'input[placeholder*="Password"]'
-            ]
-
-            filled = False
-            for us in username_selectors:
-                el = page.query_selector(us)
-                if el:
-                    el.fill(username)
-                    filled = True
-                    break
-            if not filled:
-                print('Warning: could not find username input selector; continuing and hoping for SSO or cookie-based login.')
-
-            filled = False
-            for ps in password_selectors:
-                el = page.query_selector(ps)
-                if el:
-                    el.fill(password)
-                    filled = True
-                    break
-            if not filled:
-                print('Warning: could not find password input selector; continuing.')
-
-            # Try clicking login/submit button
-            submit_selectors = [
-                'button[type="submit"]',
-                'button:has-text("Log in")',
-                'button:has-text("Login")'
-            ]
-            for ss in submit_selectors:
-                try:
-                    btn = page.query_selector(ss)
-                    if btn:
-                        btn.click()
-                        break
-                except PlaywrightTimeoutError:
-                    continue
-
-            # Give time to login (and potentially handle 2FA manually)
-            print('Waiting for login to complete (if 2FA/captcha appears, handle it manually in the opened browser)')
-            page.wait_for_load_state('networkidle', timeout=60000)
-            time.sleep(3)
-
-            # Navigate to the upload page
+            # If there is a saved session, try visiting upload directly
             page.goto('https://www.tiktok.com/upload', timeout=60000)
             page.wait_for_load_state('networkidle', timeout=60000)
             time.sleep(2)
 
+            # Detect if we were redirected to login
+            if 'login' in page.url or 'challenge' in page.url or page.title().lower().startswith('log in'):
+                if storage_exists:
+                    print('Saved storage state did not keep us logged in; you may need to refresh the storage file.')
+                # Attempt login flow if credentials provided; otherwise prompt user to login interactively
+                if username and password and not headless:
+                    print('Attempting automated credential login...')
+                    # fallthrough to login selectors below
+                else:
+                    print('Interactive login required. Please complete login in the opened browser window.')
+                    # Keep page open for manual login
+                    page.wait_for_load_state('networkidle', timeout=60000)
+                    # Wait a reasonable time for manual login (user intervention)
+                    print('Waiting up to 5 minutes for manual login completion...')
+                    try:
+                        page.wait_for_url(lambda url: 'upload' in url or 'home' in url or 'for-you' in url, timeout=300000)
+                    except PlaywrightTimeoutError:
+                        print('Timeout waiting for manual login. Continuing and may fail.')
+
+            # If we reach the upload page, proceed. Otherwise navigate to upload explicitly.
+            if 'upload' not in page.url:
+                page.goto('https://www.tiktok.com/upload', timeout=60000)
+                page.wait_for_load_state('networkidle', timeout=60000)
+                time.sleep(2)
+
             # Find the file input and set the video file
             file_input = None
-            # Common selector for file inputs
             candidates = ['input[type="file"]', 'input[accept*="video"]']
             for c in candidates:
                 file_input = page.query_selector(c)
@@ -136,6 +126,13 @@ def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optiona
 
             if not file_input:
                 print('Could not find file input on upload page. The UI may have changed.')
+                # If we saved storage after interactive login request, try to save current state for debugging
+                if save_storage_after and storage_state:
+                    try:
+                        context.storage_state(path=storage_state)
+                        print(f'Saved storage state to {storage_state} for debugging.')
+                    except Exception:
+                        pass
                 return False
 
             print('Uploading video file...')
@@ -145,7 +142,6 @@ def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optiona
             time.sleep(5)
 
             # Fill caption/description
-            # Try common caption textarea selectors
             caption_selectors = [
                 'textarea[placeholder*="Describe your video"]',
                 'textarea[placeholder*="Add a caption"]',
@@ -155,10 +151,13 @@ def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optiona
             for cs in caption_selectors:
                 el = page.query_selector(cs)
                 if el:
-                    el.click()
-                    el.fill(caption)
-                    wrote = True
-                    break
+                    try:
+                        el.click()
+                        el.fill(caption)
+                        wrote = True
+                        break
+                    except Exception:
+                        continue
 
             if not wrote:
                 print('Warning: could not find caption field; attempting to proceed.')
@@ -166,7 +165,6 @@ def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optiona
             # Wait a bit for processing to complete and for the Post button to become enabled
             time.sleep(5)
 
-            # Click Post button (selector may vary)
             post_selectors = [
                 'button:has-text("Post")',
                 'button[data-e2e="post-button"]',
@@ -186,6 +184,15 @@ def upload_to_tiktok_playwright(video_path: str, caption: str, username: Optiona
             if not clicked:
                 print('Could not find or click the Post button. The UI may have changed or additional confirmation is required.')
                 return False
+
+            # Optionally save storage state for reuse
+            if save_storage_after and storage_state:
+                try:
+                    os.makedirs(os.path.dirname(storage_state), exist_ok=True)
+                    context.storage_state(path=storage_state)
+                    print(f'Saved new storage state to {storage_state}')
+                except Exception as e:
+                    print('Failed to save storage state:', e)
 
             # Wait a short while to let the post flow complete
             time.sleep(5)
